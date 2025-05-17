@@ -1,0 +1,10 @@
+# render.yaml
+services:
+  - type: web
+    name: TRISH-Server
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn --bind 0.0.0.0:$PORT app:app
+    envVars:
+      - key: PORT
+        value: 10000
