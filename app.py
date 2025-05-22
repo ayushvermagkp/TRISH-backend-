@@ -4,7 +4,6 @@ from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 import os
 import requests
-import json
 import logging
 from dotenv import load_dotenv
 
@@ -28,16 +27,20 @@ logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 
-# OpenRouter configuration
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+# Configuration
 MODEL_NAME = "meta-llama/llama-3.3-8b-instruct:free"
-YOUR_SITE_URL = os.getenv("YOUR_SITE_URL", "http://localhost:3000")
+API_KEYS = [
+    os.getenv("OPENROUTER_API_KEY_PRIMARY"),
+    os.getenv("OPENROUTER_API_KEY_SECONDARY")
+]
+API_URL = "https://openrouter.ai/api/v1/chat/completions"
+YOUR_SITE_URL = os.getenv("YOUR_SITE_URL", "https://your-render-app.onrender.com")
 YOUR_SITE_NAME = "TRISH Discussion Platform"
 
-def get_trish_response(messages, system_prompt=None):
-    """Helper function to interact with OpenRouter API"""
+def try_api_key(api_key, messages, system_prompt=None):
+    """Attempt request with specific API key"""
     headers = {
-        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
         "HTTP-Referer": YOUR_SITE_URL,
         "X-Title": YOUR_SITE_NAME
@@ -58,16 +61,29 @@ def get_trish_response(messages, system_prompt=None):
     
     try:
         response = requests.post(
-            "https://openrouter.ai/api/v1/chat/completions",
+            API_URL,
             headers=headers,
             json=payload,
-            timeout=30
+            timeout=25
         )
         response.raise_for_status()
         return response.json()["choices"][0]["message"]["content"]
     except requests.exceptions.RequestException as e:
-        logging.error(f"OpenRouter API Error: {str(e)}")
+        logging.error(f"API key failed: {str(e)}")
         return None
+
+def get_trish_response(messages, system_prompt=None):
+    """Try API keys in sequence until successful"""
+    for api_key in API_KEYS:
+        if not api_key:
+            continue
+            
+        response = try_api_key(api_key, messages, system_prompt)
+        if response:
+            return response
+            
+    logging.error("All API keys failed")
+    return None
 
 @app.route('/api/chat', methods=['POST'])
 @limiter.limit("15/minute")
@@ -92,7 +108,7 @@ def chat():
     if response:
         return jsonify({"response": response})
     else:
-        return jsonify({"error": "Discussion service unavailable"}), 503
+        return jsonify({"error": "All AI services are currently unavailable"}), 503
 
 @app.route('/api/generate-conclusion', methods=['POST'])
 @limiter.limit("10/minute")
@@ -129,7 +145,7 @@ def generate_conclusion():
             "structured": parse_conclusion(response)
         })
     else:
-        return jsonify({"error": "Conclusion service unavailable"}), 503
+        return jsonify({"error": "All conclusion services are unavailable"}), 503
 
 def parse_conclusion(text):
     """Parse markdown conclusion into structured data"""
@@ -151,9 +167,10 @@ def health_check():
     return jsonify({
         "status": "healthy",
         "model": MODEL_NAME,
+        "available_keys": sum(1 for key in API_KEYS if key is not None),
         "site": YOUR_SITE_NAME
     })
 
 if __name__ == '__main__':
-    port = int(os.getenv("PORT", 10000))
+    port = int(os.getenv("PORT", 10000))  # Render default port
     app.run(host='0.0.0.0', port=port, debug=False)
