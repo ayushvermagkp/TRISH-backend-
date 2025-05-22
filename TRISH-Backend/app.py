@@ -1,214 +1,176 @@
-# app.py
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
-from pydantic import BaseModel, Field, ValidationError
-from markupsafe import escape
 import os
 import requests
 import logging
-from logging.handlers import RotatingFileHandler
-from typing import Optional
+from dotenv import load_dotenv
 
+# Initialize Flask app
 app = Flask(__name__)
+CORS(app)
 
-# ====================
-# CORS Configuration
-# ====================
-allowed_origins = [
-    "https://trish-a-gen-ai-chatbot.onrender.com",  
-    "http://localhost:3000"                    # For local testing
-]
-CORS(app, resources={
-    r"/api/*": {
-        "origins": allowed_origins,
-        "supports_credentials": True
-    }
-})
-
-# ====================
-# App Configuration
-# ====================
-app.config.update({
-    'JSON_SORT_KEYS': False,
-    'RATELIMIT_HEADERS_ENABLED': True,
-    'ENV': 'production' if os.environ.get('ENV') == 'production' else 'development'
-})
-
-# ====================
-# Rate Limiting
-# ====================
+# Rate limiting configuration
 limiter = Limiter(
     app=app,
     key_func=get_remote_address,
     default_limits=["200 per day", "50 per hour"]
 )
 
-# ====================
-# Logging Setup
-# ====================
-handler = RotatingFileHandler(
-    'app.log',
-    maxBytes=1024 * 1024,  # 1MB per file
-    backupCount=3
+# Load environment variables
+load_dotenv()
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
 )
-handler.setFormatter(logging.Formatter(
-    '%(asctime)s %(levelname)s: %(message)s [in %(pathname)s:%(lineno)d]'
-))
-app.logger.addHandler(handler)
-app.logger.setLevel(logging.INFO)
 
-# ====================
-# Environment Variables
-# ====================
-OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
-MODEL_NAME = os.environ.get("AI_MODEL", "meta-llama/llama-3-70b-instruct")
-MAX_TOKENS = int(os.environ.get("MAX_TOKENS", "800"))
-TEMPERATURE = float(os.environ.get("TEMPERATURE", "0.7"))
+# Configuration
+MODEL_NAME = "meta-llama/llama-3.3-8b-instruct:free"
+API_KEYS = [
+    os.getenv("OPENROUTER_API_KEY_PRIMARY"),
+    os.getenv("OPENROUTER_API_KEY_SECONDARY")
+]
+API_URL = "https://openrouter.ai/api/v1/chat/completions"
+YOUR_SITE_URL = os.getenv("YOUR_SITE_URL", "https://your-render-app.onrender.com")
+YOUR_SITE_NAME = "TRISH Discussion Platform"
 
-# ====================
-# Data Models
-# ====================
-class ChatRequest(BaseModel):
-    messages: list = Field(..., min_items=1)
-    discussionTitle: str = Field(..., min_length=2, max_length=100)
-    user_id: Optional[str] = Field(None, min_length=1)
-
-class ConclusionRequest(ChatRequest):
-    focus_areas: Optional[list] = Field(None, min_items=1)
-
-# ====================
-# Helper Functions
-# ====================
-def sanitize_input(text: str) -> str:
-    return escape(text.strip())
-
-def create_headers():
-    return {
-        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+def try_api_key(api_key, messages, system_prompt=None):
+    """Attempt request with specific API key"""
+    headers = {
+        "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
-        "Referer": os.environ.get("REFERER_URL", "https://your-domain.com"),
-        "X-Title": "Discussion Facilitator AI"
+        "HTTP-Referer": YOUR_SITE_URL,
+        "X-Title": YOUR_SITE_NAME
     }
-
-# ====================
-# AI Service Handler
-# ====================
-def get_ai_response(messages: list, discussion_context: str, system_prompt: Optional[str] = None) -> str:
+    
+    full_messages = []
+    if system_prompt:
+        full_messages.append({"role": "system", "content": system_prompt})
+    full_messages.extend(messages)
+    
+    payload = {
+        "model": MODEL_NAME,
+        "messages": full_messages,
+        "temperature": 0.7,
+        "max_tokens": 1000,
+        "top_p": 0.9
+    }
+    
     try:
-        sanitized_context = sanitize_input(discussion_context)
-        
-        system_prompt = system_prompt or f"""You are TRISH, an AI discussion facilitator. Guide discussion about: {sanitized_context}.
-        Role:
-        1. Ask thought-provoking questions
-        2. Provide relevant insights
-        3. Ensure balanced participation
-        4. Maintain focus on topic
-        Keep responses concise (1-2 paragraphs)."""
-
-        payload = {
-            "model": MODEL_NAME,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                *messages
-            ],
-            "temperature": TEMPERATURE,
-            "max_tokens": MAX_TOKENS,
-            "top_p": 0.9,
-            "frequency_penalty": 0.5,
-            "presence_penalty": 0.3
-        }
-
         response = requests.post(
-            "https://openrouter.ai/api/v1/chat/completions",
-            headers=create_headers(),
+            API_URL,
+            headers=headers,
             json=payload,
-            timeout=15
+            timeout=25
         )
         response.raise_for_status()
+        return response.json()["choices"][0]["message"]["content"]
+    except requests.exceptions.RequestException as e:
+        logging.error(f"API key failed: {str(e)}")
+        return None
 
-        response_data = response.json()
-        if not response_data.get("choices"):
-            raise ValueError("Invalid AI response structure")
-        
-        content = response_data["choices"][0]["message"].get("content", "")
-        return content if content.strip() else "Response unavailable"
-
-    except requests.exceptions.HTTPError as http_err:
-        app.logger.error(f"HTTP Error: {http_err}")
-        return "Service temporarily unavailable. Please try again."
-    except Exception as e:
-        app.logger.error(f"AI Service Error: {str(e)}")
-        return "Discussion service is currently unavailable."
-
-# ====================
-# API Endpoints
-# ====================
-@app.route('/api/health', methods=['GET'])
-def health_check():
-    return jsonify({
-        "status": "healthy",
-        "version": "1.2.0",
-        "environment": app.config['ENV']
-    })
+def get_trish_response(messages, system_prompt=None):
+    """Try API keys in sequence until successful"""
+    for api_key in API_KEYS:
+        if not api_key:
+            continue
+            
+        response = try_api_key(api_key, messages, system_prompt)
+        if response:
+            return response
+            
+    logging.error("All API keys failed")
+    return None
 
 @app.route('/api/chat', methods=['POST'])
 @limiter.limit("15/minute")
 def chat():
-    try:
-        data = ChatRequest(**request.json).dict()
-        response = get_ai_response(
-            messages=data['messages'],
-            discussion_context=data['discussionTitle']
-        )
+    """Handle real-time discussion facilitation"""
+    data = request.json
+    messages = data.get('messages', [])
+    discussion_topic = data.get('discussion_topic', 'General discussion')
+    
+    system_prompt = f"""You are TRISH, an AI discussion facilitator. Current topic: {discussion_topic}
+    Your role:
+    - Ask probing questions to deepen understanding
+    - Identify common ground between participants
+    - Challenge assumptions constructively
+    - Ensure balanced participation
+    - Keep discussion focused and productive
+    
+    Respond naturally using markdown when helpful. Be concise and engaging."""
+    
+    response = get_trish_response(messages, system_prompt)
+    
+    if response:
         return jsonify({"response": response})
-    except ValidationError as e:
-        return jsonify({"error": "Invalid request format"}), 400
-    except Exception as e:
-        app.logger.error(f"Chat Error: {str(e)}")
-        return jsonify({"error": "Processing failed"}), 500
+    else:
+        return jsonify({"error": "All AI services are currently unavailable"}), 503
 
 @app.route('/api/generate-conclusion', methods=['POST'])
 @limiter.limit("10/minute")
 def generate_conclusion():
-    try:
-        data = ConclusionRequest(**request.json).dict()
-        conclusion_prompt = f"""Generate conclusion for: {sanitize_input(data['discussionTitle'])}.
-        Format in Markdown with:
-        ## Key Points
-        ## Insights
-        ## Agreements
-        ## Recommendations"""
-        
-        response = get_ai_response(
-            messages=data['messages'],
-            discussion_context=data['discussionTitle'],
-            system_prompt=conclusion_prompt
-        )
-        return jsonify({"conclusion": response})
-    except ValidationError as e:
-        return jsonify({"error": str(e)}), 400
-    except Exception as e:
-        return jsonify({"error": "Conclusion generation failed"}), 500
+    """Generate structured discussion conclusion"""
+    data = request.json
+    messages = data.get('messages', [])
+    discussion_topic = data.get('discussion_topic', 'General discussion')
+    
+    system_prompt = f"""Generate comprehensive conclusion for: {discussion_topic}
+    Required format:
+    
+    ## Key Points Summary
+    - 3-5 main discussion outcomes
+    - Focus on concrete results
+    
+    ## Major Insights
+    - Notable observations
+    - Unexpected findings
+    - Participant breakthroughs
+    
+    ## Action Items
+    - Clear next steps with owners
+    - Specific deadlines
+    - Success metrics
+    
+    Use markdown formatting and maintain professional tone."""
+    
+    response = get_trish_response(messages, system_prompt)
+    
+    if response:
+        return jsonify({
+            "conclusion": response,
+            "structured": parse_conclusion(response)
+        })
+    else:
+        return jsonify({"error": "All conclusion services are unavailable"}), 503
 
-# ====================
-# Error Handlers
-# ====================
-@app.errorhandler(429)
-def ratelimit_handler(e):
+def parse_conclusion(text):
+    """Parse markdown conclusion into structured data"""
+    sections = {}
+    current_section = None
+    
+    for line in text.split('\n'):
+        line = line.strip()
+        if line.startswith('## '):
+            current_section = line[3:].strip()
+            sections[current_section] = []
+        elif current_section and line.startswith('- '):
+            sections[current_section].append(line[2:].strip())
+    
+    return sections
+
+@app.route('/api/health', methods=['GET'])
+def health_check():
     return jsonify({
-        "error": "Too many requests",
-        "message": "Please wait before making new requests"
-    }), 429
+        "status": "healthy",
+        "model": MODEL_NAME,
+        "available_keys": sum(1 for key in API_KEYS if key is not None),
+        "site": YOUR_SITE_NAME
+    })
 
-@app.errorhandler(404)
-def not_found_handler(e):
-    return jsonify({"error": "Endpoint not found"}), 404
-
-# ====================
-# Production Setup
-# ====================
 if __name__ == '__main__':
-    port = int(os.environ.get("PORT", 5000))
+    port = int(os.getenv("PORT", 10000))  # Render default port
     app.run(host='0.0.0.0', port=port, debug=False)
