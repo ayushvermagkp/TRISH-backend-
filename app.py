@@ -28,29 +28,25 @@ logging.basicConfig(
 )
 
 # Configuration
-MODEL_NAME = "meta-llama/llama-3.3-8b-instruct:free"
-API_KEYS = [
-    os.getenv("OPENROUTER_API_KEY_PRIMARY"),
-    os.getenv("OPENROUTER_API_KEY_SECONDARY")
-]
+MODEL_NAME = "shisa-ai/shisa-v2-llama3.3-70b:free"
+API_KEY = os.getenv("OPENROUTER_API_KEY_PRIMARY")
 API_URL = "https://openrouter.ai/api/v1/chat/completions"
 YOUR_SITE_URL = os.getenv("YOUR_SITE_URL", "https://your-render-app.onrender.com")
 YOUR_SITE_NAME = "TRISH Discussion Platform"
 
-def try_api_key(api_key, messages, system_prompt=None):
-    """Attempt request with specific API key"""
+def call_openrouter_api(messages, system_prompt=None):
     headers = {
-        "Authorization": f"Bearer {api_key}",
+        "Authorization": f"Bearer {API_KEY}",
         "Content-Type": "application/json",
-        "HTTP-Referer": YOUR_SITE_URL,
+        "Referer": YOUR_SITE_URL,
         "X-Title": YOUR_SITE_NAME
     }
-    
+
     full_messages = []
     if system_prompt:
         full_messages.append({"role": "system", "content": system_prompt})
     full_messages.extend(messages)
-    
+
     payload = {
         "model": MODEL_NAME,
         "messages": full_messages,
@@ -58,7 +54,7 @@ def try_api_key(api_key, messages, system_prompt=None):
         "max_tokens": 1000,
         "top_p": 0.9
     }
-    
+
     try:
         response = requests.post(
             API_URL,
@@ -68,31 +64,21 @@ def try_api_key(api_key, messages, system_prompt=None):
         )
         response.raise_for_status()
         return response.json()["choices"][0]["message"]["content"]
-    except requests.exceptions.RequestException as e:
-        logging.error(f"API key failed: {str(e)}")
-        return None
 
-def get_trish_response(messages, system_prompt=None):
-    """Try API keys in sequence until successful"""
-    for api_key in API_KEYS:
-        if not api_key:
-            continue
-            
-        response = try_api_key(api_key, messages, system_prompt)
-        if response:
-            return response
-            
-    logging.error("All API keys failed")
-    return None
+    except requests.exceptions.RequestException as e:
+        if e.response is not None:
+            logging.error(f"API failed with status {e.response.status_code}: {e.response.text}")
+        else:
+            logging.error(f"API failed: {str(e)}")
+        return None
 
 @app.route('/api/chat', methods=['POST'])
 @limiter.limit("15/minute")
 def chat():
-    """Handle real-time discussion facilitation"""
     data = request.json
     messages = data.get('messages', [])
     discussion_topic = data.get('discussion_topic', 'General discussion')
-    
+
     system_prompt = f"""You are TRISH, an AI discussion facilitator. Current topic: {discussion_topic}
     Your role:
     - Ask probing questions to deepen understanding
@@ -100,11 +86,11 @@ def chat():
     - Challenge assumptions constructively
     - Ensure balanced participation
     - Keep discussion focused and productive
-    
+
     Respond naturally using markdown when helpful. Be concise and engaging."""
-    
-    response = get_trish_response(messages, system_prompt)
-    
+
+    response = call_openrouter_api(messages, system_prompt)
+
     if response:
         return jsonify({"response": response})
     else:
@@ -113,32 +99,31 @@ def chat():
 @app.route('/api/generate-conclusion', methods=['POST'])
 @limiter.limit("10/minute")
 def generate_conclusion():
-    """Generate structured discussion conclusion"""
     data = request.json
     messages = data.get('messages', [])
     discussion_topic = data.get('discussion_topic', 'General discussion')
-    
+
     system_prompt = f"""Generate comprehensive conclusion for: {discussion_topic}
     Required format:
-    
+
     ## Key Points Summary
     - 3-5 main discussion outcomes
     - Focus on concrete results
-    
+
     ## Major Insights
     - Notable observations
     - Unexpected findings
     - Participant breakthroughs
-    
+
     ## Action Items
     - Clear next steps with owners
     - Specific deadlines
     - Success metrics
-    
+
     Use markdown formatting and maintain professional tone."""
-    
-    response = get_trish_response(messages, system_prompt)
-    
+
+    response = call_openrouter_api(messages, system_prompt)
+
     if response:
         return jsonify({
             "conclusion": response,
@@ -148,10 +133,9 @@ def generate_conclusion():
         return jsonify({"error": "All conclusion services are unavailable"}), 503
 
 def parse_conclusion(text):
-    """Parse markdown conclusion into structured data"""
     sections = {}
     current_section = None
-    
+
     for line in text.split('\n'):
         line = line.strip()
         if line.startswith('## '):
@@ -159,7 +143,7 @@ def parse_conclusion(text):
             sections[current_section] = []
         elif current_section and line.startswith('- '):
             sections[current_section].append(line[2:].strip())
-    
+
     return sections
 
 @app.route('/api/health', methods=['GET'])
@@ -167,10 +151,10 @@ def health_check():
     return jsonify({
         "status": "healthy",
         "model": MODEL_NAME,
-        "available_keys": sum(1 for key in API_KEYS if key is not None),
+        "key_loaded": bool(API_KEY),
         "site": YOUR_SITE_NAME
     })
 
 if __name__ == '__main__':
-    port = int(os.getenv("PORT", 10000))  # Render default port
+    port = int(os.getenv("PORT", 10000))
     app.run(host='0.0.0.0', port=port, debug=False)
