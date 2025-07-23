@@ -28,7 +28,7 @@ logging.basicConfig(
 )
 
 # Configuration
-MODEL_NAME = "shisa-ai/shisa-v2-llama3.3-70b:free"
+MODEL_NAME = "meta-llama/llama-3.3-70b-instruct:free"
 API_KEY = os.getenv("OPENROUTER_API_KEY_PRIMARY")
 API_URL = "https://openrouter.ai/api/v1/chat/completions"
 YOUR_SITE_URL = os.getenv("YOUR_SITE_URL", "https://your-render-app.onrender.com")
